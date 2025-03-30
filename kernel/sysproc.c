@@ -9,9 +9,18 @@
 uint64
 sys_exit(void)
 {
+  int msg_len = sizeof(myproc()->exit_msg);
+
   int n;
+  char msg[32];
+
   argint(0, &n);
-  exit(n);
+  argstr(1, msg, msg_len);
+
+  struct proc *p = myproc();
+  safestrcpy(p->exit_msg, msg, msg_len);
+
+  exit(n, msg);
   return 0;  // not reached
 }
 
@@ -30,9 +39,11 @@ sys_fork(void)
 uint64
 sys_wait(void)
 {
-  uint64 p;
-  argaddr(0, &p);
-  return wait(p);
+  uint64 status_pointer;
+  uint64 exit_msg_pointer;
+  argaddr(0, &status_pointer);
+  argaddr(1, &exit_msg_pointer);
+  return wait(status_pointer, exit_msg_pointer);
 }
 
 uint64
@@ -88,4 +99,10 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_memsize(void)
+{
+  return myproc()->sz;
 }
