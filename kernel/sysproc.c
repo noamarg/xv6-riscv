@@ -21,7 +21,7 @@ sys_exit(void)
   safestrcpy(p->exit_msg, msg, msg_len);
 
   exit(n, msg);
-  return 0;  // not reached
+  return 0; // not reached
 }
 
 uint64
@@ -37,6 +37,20 @@ sys_fork(void)
 }
 
 uint64
+sys_forkn(void)
+{
+  int n;
+  uint64 pids;
+
+  argint(0, &n);
+  if (n < 1 || n > 16)
+    return -1;
+  argaddr(1, &pids);
+
+  return forkn(n, pids);
+}
+
+uint64
 sys_wait(void)
 {
   uint64 status_pointer;
@@ -47,6 +61,17 @@ sys_wait(void)
 }
 
 uint64
+sys_waitall(void)
+{
+  uint64 pids_ptr;
+  uint64 statuses_ptr;
+
+  argaddr(0, &pids_ptr);
+  argaddr(1, &statuses_ptr);
+  return waitall(pids_ptr, statuses_ptr);
+}
+
+uint64
 sys_sbrk(void)
 {
   uint64 addr;
@@ -54,7 +79,7 @@ sys_sbrk(void)
 
   argint(0, &n);
   addr = myproc()->sz;
-  if(growproc(n) < 0)
+  if (growproc(n) < 0)
     return -1;
   return addr;
 }
@@ -68,8 +93,10 @@ sys_sleep(void)
   argint(0, &n);
   acquire(&tickslock);
   ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(killed(myproc())){
+  while (ticks - ticks0 < n)
+  {
+    if (killed(myproc()))
+    {
       release(&tickslock);
       return -1;
     }
