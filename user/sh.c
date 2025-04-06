@@ -167,11 +167,10 @@ main(void)
     }
     if(fork1() == 0)
       runcmd(parsecmd(buf));
-    //wait(0, "");
     int status;
     char exit_msg[32];
     wait(&status, exit_msg);
-    printf("Child process exited with message: %s\n", exit_msg);
+    printf("Process exited with message: %s\n", exit_msg);
   }
   exit(0, "");
 }

@@ -332,59 +332,72 @@ int fork(void)
     return pid;
 }
 
-int forkn(int n, int *pids)
+int forkn(uint64 n, uint64 pids)
 {
-    int i;
-    struct proc *forked_procs[n];
+    int i, j;
+    struct proc *forked_procs[16];
     struct proc *p = myproc();
 
     for (i = 0; i < n; i++)
     {
-        struct proc *np = forked_procs[i];
-
-        if ((forked_procs[i] = allocproc()) == 0)
+        struct proc *np;
+        if ((np = allocproc()) == 0)
         {
-            // If one fails, free all the previous successful ones.
-            for (int j = 0; j < i; j++)
+            for (j = 0; j < i; j++)
             {
                 freeproc(forked_procs[j]);
             }
             return -1;
         }
-        pids[i] = forked_procs[i]->pid;
+        forked_procs[i] = np;
 
+        if (copyout(p->pagetable, pids + i * sizeof(int), (char *)&np->pid, sizeof(int)) < 0)
+        {
+            for (j = 0; j < i; j++)
+            {
+                freeproc(forked_procs[j]);
+            }
+            return -1;
+        }
+
+        // Copy parent's user memory.
         if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0)
         {
             acquire(&np->lock);
-            // If one fails, free all the previous successful ones.
-            for (int j = 0; j < i; j++)
+            for (j = 0; j < i; j++)
             {
                 freeproc(forked_procs[j]);
             }
             release(&np->lock);
             return -1;
         }
-
         np->sz = p->sz;
         *(np->trapframe) = *(p->trapframe);
         np->trapframe->a0 = i + 1;
 
-        for (int j = 0; j < NOFILE; j++)
+        // Duplicate open file descriptors.
+        for (j = 0; j < NOFILE; j++)
+        {
             if (p->ofile[j])
                 np->ofile[j] = filedup(p->ofile[j]);
+        }
         np->cwd = idup(p->cwd);
-
         safestrcpy(np->name, p->name, sizeof(p->name));
 
-        release(&np->lock);
-
+        // Set the parent pointer.
         acquire(&wait_lock);
         np->parent = p;
         release(&wait_lock);
 
-        acquire(&np->lock);
-        np->state = RUNNABLE;
         release(&np->lock);
+    }
+
+    // Set the state of the forked processes to RUNNABLE.
+    for (i = 0; i < n; i++)
+    {
+        acquire(&forked_procs[i]->lock);
+        forked_procs[i]->state = RUNNABLE;
+        release(&forked_procs[i]->lock);
     }
 
     return 0;
@@ -462,7 +475,7 @@ int wait(uint64 status_pointer, uint64 exit_msg_pointer)
     struct proc *p = myproc();
 
     acquire(&wait_lock);
-    for ( ; ; )
+    for (;;)
     {
         // Scan through table looking for exited children.
         havekids = 0;
@@ -511,67 +524,71 @@ int wait(uint64 status_pointer, uint64 exit_msg_pointer)
     }
 }
 
-int waitall(int *n, int *s)
+int waitall(uint64 n_ptr, uint64 statuses_ptr)
 {
     struct proc *pp;
-    int havekids, pid;
-    struct proc *p = myproc();
+    struct proc *curproc = myproc();
+    int total, zombies, count;
+    int exit_statuses[NPROC]; // Local array to hold exit statuses of children.
 
     acquire(&wait_lock);
-    for ( ; ; )
+    for (;;)
     {
-        // Scan through table looking for exited children.
-        havekids = 0;
+        total = 0;
+        zombies = 0;
+        count = 0;
+        // Scan through the process table for children of curproc.
         for (pp = proc; pp < &proc[NPROC]; pp++)
         {
-            if (pp->parent == p)
+            if (pp->parent != curproc)
+                continue;
+            total++;
+            acquire(&pp->lock);
+            if (pp->state == ZOMBIE)
             {
-                // make sure the child isn't still in exit() or swtch().
-                acquire(&pp->lock);
-
-                havekids++;
-                if (pp->state == ZOMBIE)
-                {
-                    // Found one.
-                    pid = pp->pid;
-                    if (status_pointer != 0 && copyout(p->pagetable, status_pointer, (char *)&pp->xstate, sizeof(pp->xstate)) < 0)
-                    {
-                        release(&pp->lock);
-                        release(&wait_lock);
-                        return -1;
-                    }
-                    if (exit_msg_pointer != 0 && copyout(p->pagetable, exit_msg_pointer, (char *)&pp->exit_msg, sizeof(pp->exit_msg)) < 0)
-                    {
-                        release(&pp->lock);
-                        release(&wait_lock);
-                        return -1;
-                    }
-                    freeproc(pp);
-                    release(&pp->lock);
-                    release(&wait_lock);
-                    return pid;
-                }
-                release(&pp->lock);
+                zombies++;
+                exit_statuses[count++] = pp->xstate;
             }
+            release(&pp->lock);
         }
 
-        if(killed(p))
+        if (total == 0)
         {
+            // No children exist; release lock and copy out 0.
             release(&wait_lock);
-            return -1;
-        }
-        
-        // No point waiting if we don't have any children.
-        if (!havekids)
-        {
-            release(&wait_lock);
-            *n = 0;
+            if (copyout(curproc->pagetable, n_ptr, (char *)&total, sizeof(total)) < 0)
+                return -1;
             return 0;
         }
 
-        // Wait for a child to exit.
-        sleep(p, &wait_lock); // DOC: wait-sleep
+        // If some children are still running, sleep and try again.
+        if (zombies < total)
+            sleep(curproc, &wait_lock);
+        else
+            break;
     }
+    release(&wait_lock);
+
+    // Copy out the total number of children and the exit statuses.
+    if (copyout(curproc->pagetable, n_ptr, (char *)&total, sizeof(total)) < 0)
+        return -1;
+    if (copyout(curproc->pagetable, statuses_ptr, (char *)exit_statuses, total * sizeof(int)) < 0)
+        return -1;
+
+    // Reap (free) all zombie children.
+    acquire(&wait_lock);
+    for (pp = proc; pp < &proc[NPROC]; pp++)
+    {
+        if (pp->parent != curproc)
+            continue;
+        acquire(&pp->lock);
+        if (pp->state == ZOMBIE)
+            freeproc(pp);
+        release(&pp->lock);
+    }
+    release(&wait_lock);
+
+    return 0;
 }
 
 // Per-CPU process scheduler.
